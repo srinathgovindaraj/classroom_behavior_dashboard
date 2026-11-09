@@ -38,11 +38,25 @@ REQUIRED_COLUMNS = {
     "observation_minutes",
 }
 
-INK = "#1B2F6B"
-GREEN_PEN = "#1F8A70"
-SKY = "#7FA6D6"
-PENCIL = "#5B6780"
-RULE = "#CFE0F2"
+CAPTURE_COLUMNS = {
+    "timestamp",
+    "learner_id",
+    "engagement_pct",
+    "movement_events",
+    "fidgeting_events",
+    "looking_away_events",
+    "observation_minutes",
+}
+
+# Below this, the camera probably couldn't see a face, so the number says little about the child.
+LOW_ENGAGEMENT_CHECK = 5
+
+INK = "#1A1A1A"
+ORANGE = "#E8501F"
+LIGHT_ORANGE = "#F7B79E"
+GRAY = "#C9C9C9"
+PENCIL = "#6B6B6B"
+RULE = "#E0E0E0"
 
 
 def make_demo_data() -> pd.DataFrame:
@@ -83,15 +97,131 @@ def make_demo_data() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_uploaded_data(upload) -> tuple[pd.DataFrame | None, str | None]:
+def make_demo_timeline(data: pd.DataFrame) -> pd.DataFrame:
+    """Create clearly synthetic per-minute measurements for the latest demo day."""
+    rng = np.random.default_rng(41)
+    latest = data["date"].max()
+    rows: list[dict] = []
+    for record in data[data["date"] == latest].itertuples(index=False):
+        for minute in range(35):
+            # A settled start, a restless middle, and a calmer finish.
+            restless = np.exp(-(((minute - 20) / 7) ** 2))
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp(latest) + pd.Timedelta(hours=9, minutes=minute),
+                    "date": latest,
+                    "learner_id": record.learner_id,
+                    "engagement_pct": float(np.clip(record.engagement_pct - 25 * restless + rng.normal(0, 6), 0, 100)),
+                    "movement_events": int(rng.poisson(0.2 + 1.3 * restless)),
+                    "fidgeting_events": int(rng.poisson(0.4 + 1.0 * restless)),
+                    "looking_away_events": int(rng.poisson(0.2 + 0.8 * restless)),
+                    "observation_minutes": 1.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def with_activity_level(frame: pd.DataFrame) -> pd.DataFrame:
+    rate = frame["movement_events"] / frame["observation_minutes"].replace(0, np.nan)
+    frame["activity_level"] = np.select([rate < 0.34, rate < 0.68], ["Low", "Moderate"], default="High")
+    frame.loc[rate.isna(), "activity_level"] = "Unrated"
+    return frame
+
+
+def load_capture_file(frame: pd.DataFrame) -> tuple[pd.DataFrame | None, pd.DataFrame | None, str | None]:
+    """Read per-minute measurements from capture.py and summarize them by day."""
+    missing = sorted(CAPTURE_COLUMNS - set(frame.columns))
+    if missing:
+        return None, None, "Missing required columns: " + ", ".join(missing)
+
+    timeline = frame.copy()
+    timeline["timestamp"] = pd.to_datetime(timeline["timestamp"], errors="coerce")
+    numeric_columns = sorted(CAPTURE_COLUMNS - {"timestamp", "learner_id"})
+    for column in numeric_columns:
+        timeline[column] = pd.to_numeric(timeline[column], errors="coerce")
+    timeline["learner_id"] = timeline["learner_id"].astype("string").str.strip()
+    timeline = timeline.dropna(subset=["timestamp", "learner_id", *numeric_columns])
+    timeline = timeline[timeline["learner_id"] != ""]
+    if timeline.empty:
+        return None, None, "No usable rows found. Check that times, learner IDs, and numeric values are filled in."
+
+    timeline["date"] = timeline["timestamp"].dt.date
+    daily = timeline.groupby(["date", "learner_id"], as_index=False).agg(
+        engagement_pct=("engagement_pct", "mean"),
+        movement_events=("movement_events", "sum"),
+        fidgeting_events=("fidgeting_events", "sum"),
+        looking_away_events=("looking_away_events", "sum"),
+        observation_minutes=("observation_minutes", "sum"),
+    )
+    daily["participation_pct"] = np.nan  # a camera can't measure participation
+    return with_activity_level(daily).sort_values("date"), timeline.sort_values("timestamp"), None
+
+
+def count_label(count: float, noun: str) -> str:
+    return f"{count:.0f} {noun}" + ("" if round(count) == 1 else "s")
+
+
+def time_window(start: pd.Timestamp, minutes: int) -> str:
+    return f"{start:%H:%M} to {start + pd.Timedelta(minutes=minutes):%H:%M}"
+
+
+def caregiver_summary(day: pd.DataFrame, buckets: pd.DataFrame, minutes: int, other_days: pd.DataFrame) -> list[str]:
+    """Explain one learner's day in plain language, comparing them only with themselves."""
+    learner = day["learner_id"].iloc[0]
+    observed = day["observation_minutes"].sum()
+    first, last = day["timestamp"].min(), day["timestamp"].max() + pd.Timedelta(minutes=1)
+    average = day["engagement_pct"].mean()
+    lines = [f"{learner} was observed for about {observed:.0f} minutes on {first:%d %b %Y}, from {first:%H:%M} to {last:%H:%M}."]
+
+    high = buckets.loc[buckets["engagement_pct"].idxmax()]
+    low = buckets.loc[buckets["engagement_pct"].idxmin()]
+    if average < LOW_ENGAGEMENT_CHECK:
+        lines.append("Estimated engagement can't be read reliably for this session. See the note above.")
+    elif high["engagement_pct"] - low["engagement_pct"] < 1:
+        lines.append(f"Estimated engagement averaged **{average:.0f}%** and stayed about the same throughout.")
+    else:
+        lines.append(
+            f"Estimated engagement averaged **{average:.0f}%**."
+            f" It was highest from {time_window(high['timestamp'], minutes)} ({high['engagement_pct']:.0f}%)"
+            f" and lowest from {time_window(low['timestamp'], minutes)} ({low['engagement_pct']:.0f}%)."
+        )
+
+    busiest = buckets.loc[buckets["movement_events"].idxmax()]
+    if busiest["movement_events"] > 0:
+        lines.append(f"Most movement was from {time_window(busiest['timestamp'], minutes)}, with {count_label(busiest['movement_events'], 'movement event')}.")
+    else:
+        lines.append("No large movements were recorded.")
+
+    away = buckets.loc[buckets["looking_away_events"].idxmax()]
+    if away["looking_away_events"] > 0:
+        lines.append(f"Looking away happened most from {time_window(away['timestamp'], minutes)}, with {count_label(away['looking_away_events'], 'event')}.")
+
+    if other_days["date"].nunique() >= 2 and average >= LOW_ENGAGEMENT_CHECK:
+        usual = other_days.groupby("date")["engagement_pct"].mean().mean()
+        difference = average - usual
+        if abs(difference) < 5:
+            lines.append(f"This is close to their own average of {usual:.0f}% on other observed days.")
+        else:
+            direction = "above" if difference > 0 else "below"
+            lines.append(f"This is about {abs(difference):.0f} points {direction} their own average of {usual:.0f}% on other observed days.")
+
+    if busiest["movement_events"] > 0:
+        lines.append(f"A useful question for the teacher: what was the class doing from {time_window(busiest['timestamp'], minutes)}?")
+    return lines
+
+
+def load_uploaded_data(upload) -> tuple[pd.DataFrame | None, pd.DataFrame | None, str | None]:
     try:
         frame = pd.read_csv(upload)
     except Exception as exc:  # show a helpful message for malformed uploads
-        return None, f"Could not read this CSV: {exc}"
+        return None, None, f"Could not read this CSV: {exc}"
+
+    if "timestamp" in frame.columns:
+        return load_capture_file(frame)
 
     missing = sorted(REQUIRED_COLUMNS - set(frame.columns))
     if missing:
-        return None, "Missing required columns: " + ", ".join(missing)
+        return None, None, "Missing required columns: " + ", ".join(missing)
 
     frame = frame.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
@@ -110,15 +240,11 @@ def load_uploaded_data(upload) -> tuple[pd.DataFrame | None, str | None]:
     frame = frame[frame["learner_id"] != ""]
 
     if frame.empty:
-        return None, "No usable rows found. Check that dates, learner IDs, and numeric values are filled in."
+        return None, None, "No usable rows found. Check that dates, learner IDs, and numeric values are filled in."
 
     if "activity_level" not in frame.columns:
-        rate = frame["movement_events"] / frame["observation_minutes"].replace(0, np.nan)
-        frame["activity_level"] = np.select(
-            [rate < 0.34, rate < 0.68], ["Low", "Moderate"], default="High"
-        )
-        frame.loc[rate.isna(), "activity_level"] = "Unrated"
-    return frame.sort_values("date"), None
+        frame = with_activity_level(frame)
+    return frame.sort_values("date"), None, None
 
 
 def style_chart(fig, height: int = 310):
@@ -128,10 +254,21 @@ def style_chart(fig, height: int = 310):
         dragmode=False,  # drag-to-zoom captures touches and stops the page scrolling on phones
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Andika, system-ui, sans-serif", color=PENCIL, size=13),
+        font=dict(family="Plus Jakarta Sans, system-ui, sans-serif", color=PENCIL, size=13),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         xaxis=dict(showgrid=False, linecolor=RULE),
-        yaxis=dict(gridcolor=RULE, zeroline=False),
+        yaxis=dict(gridcolor=RULE, griddash="dash", zeroline=False),
+        barcornerradius=6,
+    )
+    return fig
+
+
+def hatch_bars(fig, name: str):
+    """Give one bar series diagonal orange stripes, so it reads without relying on color alone."""
+    fig.for_each_trace(
+        lambda trace: trace.update(marker_pattern=dict(shape="/", fgcolor=ORANGE, bgcolor=LIGHT_ORANGE, solidity=0.45))
+        if trace.name.startswith(name)
+        else None
     )
     return fig
 
@@ -232,7 +369,7 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
     overview_table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF1F9")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5F5F5")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(INK)),
                 ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(INK)),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -299,51 +436,80 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
 st.markdown(
     """
     <style>
-      /* The page: white paper with the red margin line of an exercise book. */
+      /* The page: white rounded panels floating on a light gray canvas. */
       .block-container {
-        max-width: 1180px;
-        /* Streamlit sizes this to one screen; it must grow so the margin line runs the full page. */
+        max-width: 1240px;
+        /* Streamlit sizes this to one screen; it must grow with the content. */
         height: auto !important;
         flex: 1 0 auto;
         min-height: 100dvh;
-        padding: 3.75rem 2.5rem 2.5rem 6rem;
-        background: linear-gradient(#C8363F, #C8363F) 4.5rem 0 / 2px 100% no-repeat;
+        padding: 3.5rem 2rem 2.5rem;
       }
-      [data-testid="stMain"] h1 { font-size: 2.75rem; font-weight: 700; line-height: 1.15; padding: 0; }
-      [data-testid="stMain"] :is(h2, h3) { font-size: 1.5rem; font-weight: 700; padding: .5rem 0 .25rem; }
-      [data-testid="stMain"] p.scope { color: #5B6780; font-size: 1.05rem; margin: 0 0 1rem; }
-      [data-testid="stMain"] p.page-note { color: #5B6780; font-size: .9rem; line-height: 1.5; max-width: 70ch; margin: .75rem 0 1.5rem; }
-      [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: #5B6780 !important; opacity: 1 !important; }
-      [data-testid="stMain"] code { color: #1B2F6B; background: #EAF1F9; }
+      [data-testid="stHeader"] { background: #EFEFEF; }
+      [data-testid="stMain"] h1 { font-size: 2.5rem; font-weight: 500; letter-spacing: -.02em; line-height: 1.15; padding: 0; }
+      [data-testid="stMain"] :is(h2, h3) { font-size: 1.15rem; font-weight: 600; letter-spacing: -.01em; padding: .5rem 0 .25rem; }
+      [data-testid="stSidebar"] h2 { font-size: 1.25rem; font-weight: 600; letter-spacing: -.01em; }
+      [data-testid="stSidebar"] { border: 0; border-radius: 0 24px 24px 0; }
+      [data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) { background: #FFF1EA; }
+      [data-testid="stAlertContentInfo"] * { color: #9A3412; }
+      [data-testid="stMain"] p.scope { color: #6B6B6B; font-size: 1rem; margin: 0 0 1rem; }
+      [data-testid="stMain"] p.page-note { color: #6B6B6B; font-size: .875rem; line-height: 1.55; max-width: 70ch; margin: .75rem 0 1.5rem; }
+      [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: #6B6B6B !important; opacity: 1 !important; }
+      [data-testid="stMain"] code { color: #1A1A1A; background: #F2F2F2; }
       /* Both dates need the room the calendar icon takes; clicking the field still opens the calendar. */
       [data-testid="stSidebar"] [data-testid="stDateInput"] input { font-size: .875rem; padding-right: 0; }
       [data-testid="stSidebar"] [data-testid="stDateInput"] svg { display: none; }
       .register .narrow { display: none; }
-      :focus-visible { outline: 2px solid #1B2F6B; outline-offset: 2px; }
+      :focus-visible { outline: 2px solid #E8501F; outline-offset: 2px; }
 
-      /* Totals sit in the page as a written line, not as cards. */
-      [data-testid="stMetricLabel"] { color: #5B6780; }
-      [data-testid="stMetricValue"] { font-size: 1.75rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+      /* Totals: white tiles, with one orange tile leading the row. */
+      [data-testid="stMetric"] { background: #FFFFFF; border-radius: 18px; padding: 1rem 1.15rem; }
+      [data-testid="stMetricLabel"] { color: #6B6B6B; }
+      [data-testid="stMetricValue"] { color: #1A1A1A; font-size: 2rem; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+      .st-key-kpis_overview [data-testid="stColumn"]:first-child [data-testid="stMetric"] { background: linear-gradient(160deg, #D9480F, #EF6A33); }
+      .st-key-kpis_overview [data-testid="stColumn"]:first-child [data-testid="stMetric"] * { color: #FFFFFF; }
+      [role="tabpanel"] [data-testid="stMetric"] { background: #F5F5F5; }
 
-      /* The register: every learner on a ruled line, in ID order. */
-      [data-testid="stMain"] table.register { display: table; width: 100%; border-collapse: collapse; border: 0; margin: .25rem 0 0; font-variant-numeric: tabular-nums; }
+      /* The menu: a white pill bar with a black pill on the open tab. */
+      [data-testid="stTabs"] [role="tablist"] { background: #FFFFFF; border-radius: 999px; padding: .35rem; gap: .25rem; width: fit-content; max-width: 100%; }
+      [data-testid="stTabs"] [role="tab"] { border-radius: 999px; padding: .5rem 1.1rem; height: auto; }
+      [data-testid="stTabs"] [role="tab"][aria-selected="true"] { background: #1A1A1A; }
+      [data-testid="stTabs"] [role="tab"][aria-selected="true"] * { color: #FFFFFF; }
+      [data-testid="stTabs"] .react-aria-SelectionIndicator { display: none; }
+      /* No focus ring after a click or tap; keyboard users still get a clear neutral one. */
+      [data-testid="stTabs"] [role="tab"]:focus, [data-testid="stTabs"] [role="tab"]:focus-visible { outline: none; box-shadow: none; }
+      [data-testid="stTabs"] [role="tab"][data-focus-visible] { outline: 2px solid #1A1A1A; outline-offset: 2px; }
+      @media (hover: hover) and (pointer: fine) {
+        [data-testid="stTabs"] [role="tab"][aria-selected="false"]:hover { background: #F2F2F2; }
+        [data-testid="stTabs"] [role="tab"][aria-selected="false"]:hover * { color: #1A1A1A; }
+      }
+
+      /* Each tab opens as one large white panel; charts sit on a gray inset inside it. */
+      [role="tabpanel"] { background: #FFFFFF; border-radius: 24px; padding: 1.5rem; margin-top: .75rem; }
+      [role="tabpanel"] [data-testid="stPlotlyChart"] { background: #F7F7F7; border-radius: 16px; padding: .5rem; }
+
+      /* The register: every learner on its own row, in ID order. */
+      [data-testid="stMain"] table.register { display: table; width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid #E6E6E6; border-radius: 16px; margin: 0; font-variant-numeric: tabular-nums; }
       [data-testid="stMain"] table.register tr { border: 0; background: transparent; }
-      [data-testid="stMain"] table.register :is(th, td) { border: 0; border-bottom: 1px solid #CFE0F2; padding: 0 .75rem; height: 2.5rem; background: transparent; color: #1B2F6B; text-align: left; vertical-align: middle; font-size: 1rem; white-space: nowrap; }
-      [data-testid="stMain"] table.register thead th { border-bottom: 2px solid #1B2F6B; font-weight: 700; font-size: .9rem; }
-      [data-testid="stMain"] table.register tbody th { font-weight: 700; }
+      [data-testid="stMain"] table.register :is(th, td) { border: 0; border-bottom: 1px solid #EFEFEF; padding: 0 .9rem; height: 2.75rem; background: transparent; color: #1A1A1A; text-align: left; vertical-align: middle; font-size: .95rem; white-space: nowrap; }
+      [data-testid="stMain"] table.register tbody tr:last-child :is(th, td) { border-bottom: 0; }
+      [data-testid="stMain"] table.register thead th { background: #F5F5F5; color: #6B6B6B; font-weight: 500; font-size: .85rem; }
+      [data-testid="stMain"] table.register thead th:first-child { border-top-left-radius: 15px; }
+      [data-testid="stMain"] table.register thead th:last-child { border-top-right-radius: 15px; }
+      [data-testid="stMain"] table.register tbody th { font-weight: 500; }
       [data-testid="stMain"] table.register .num { text-align: right; }
-      [data-testid="stMain"] table.register td.trend { width: 40%; color: #1B2F6B; }
+      [data-testid="stMain"] table.register td.trend { width: 40%; color: #E8501F; }
       .register svg { display: block; width: 100%; max-width: 280px; height: 24px; }
-      .register mark { background: #FFF1A8; color: #1B2F6B; padding: .1rem .35rem; margin-left: -.35rem; }
+      .register mark { background: #FFE9B0; color: #1A1A1A; border-radius: 999px; padding: .15rem .55rem; margin-left: -.55rem; }
       .register .flag { display: inline-block; margin-left: .5rem; font-size: .8rem; font-weight: 400; }
 
-      .stDownloadButton button { background: #1B2F6B; color: white; border: 0; font-weight: 700; }
+      .stDownloadButton button { background: #1A1A1A; color: white; border: 0; border-radius: 999px; font-weight: 600; padding-inline: 1.25rem; }
       .stDownloadButton button p { color: white; }
 
       /* Touch devices: no tap flash, larger targets, no iOS zoom on input focus. */
       html { -webkit-tap-highlight-color: transparent; }
       button, [role="tab"] { touch-action: manipulation; }
-      .stDownloadButton button:active { background: #12214D; }
+      .stDownloadButton button:active { background: #3A3A3A; }
       @media (hover: none) {
         .modebar-container { display: none !important; }
       }
@@ -354,17 +520,23 @@ st.markdown(
 
       /* Phone layout */
       @media (max-width: 640px) {
-        .block-container { padding: 3.75rem .875rem 2rem 2rem; background-position: 1.125rem 0; }
-        [data-testid="stMain"] h1 { font-size: 2.25rem; }
-        [data-testid="stMain"] :is(h2, h3) { font-size: 1.3rem; }
-        [data-testid="stMain"] p.scope { font-size: .95rem; }
-        [role="tablist"] { gap: .75rem; }
+        .block-container { padding: 3.25rem .75rem 2rem; }
+        [data-testid="stMetric"] { padding: .75rem .9rem; border-radius: 16px; }
+        [data-testid="stMain"] h1 { font-size: 2rem; }
+        [data-testid="stMain"] :is(h2, h3) { font-size: 1.1rem; }
+        [data-testid="stMain"] p.scope { font-size: .9rem; }
+        [data-testid="stTabs"] [role="tablist"] { gap: 0; padding: .25rem; }
+        [data-testid="stTabs"] [role="tab"] { padding: .4rem .5rem; }
+        [data-testid="stTabs"] [role="tab"] p { font-size: .8rem; }
+        [role="tabpanel"] { padding: .875rem .75rem; border-radius: 20px; }
+        [role="tabpanel"] [data-testid="stPlotlyChart"] { padding: .25rem; }
+        [data-testid="stMain"] table.register thead th:nth-child(4) { border-top-right-radius: 15px; }
         [class*="st-key-kpis"] [data-testid="stHorizontalBlock"] { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
         [class*="st-key-kpis"] [data-testid="stColumn"] { width: auto; min-width: 0; }
         [class*="st-key-kpis"] [data-testid="stColumn"]:last-child:nth-child(odd) { grid-column: 1 / -1; }
         [data-testid="stMetricValue"] { font-size: 1.5rem; }
         [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { white-space: normal !important; overflow: visible !important; }
-        [data-testid="stMain"] table.register :is(th, td) { padding: 0 .25rem; font-size: .9rem; }
+        [data-testid="stMain"] table.register :is(th, td) { padding: 0 .3rem; font-size: .875rem; }
         .register .wide { display: none; }
         .register .narrow { display: inline; }
         [data-testid="stMain"] table.register { table-layout: fixed; }
@@ -375,12 +547,18 @@ st.markdown(
         [data-testid="stMain"] table.register thead th:nth-child(3) { width: 30%; }
         [data-testid="stMain"] table.register thead th:nth-child(4) { width: auto; }
         [data-testid="stMain"] table.register .obs { display: none; }
-        .register .flag { display: block; margin-left: 0; font-size: .7rem; line-height: 1; }
+        .register mark { display: inline-block; max-width: 100%; margin-left: 0; padding: .1rem .25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+        .register .flag { display: block; margin-left: 0; margin-top: .15rem; font-size: .7rem; line-height: 1; }
         [data-testid="stElementContainer"]:has(.stDownloadButton), .stDownloadButton, .stDownloadButton button { width: 100% !important; }
       }
       /* Smallest phones: keep the column headings on one line. */
       @media (max-width: 360px) {
-        [data-testid="stMain"] table.register thead th { font-size: .68rem; }
+        [role="tabpanel"] { padding: .75rem .5rem; }
+        [data-testid="stMain"] table.register thead th { font-size: .66rem; }
+        [data-testid="stMain"] table.register thead th:nth-child(1) { width: 21%; }
+        [data-testid="stMain"] table.register thead th:nth-child(2) { width: 28%; }
+        [data-testid="stMain"] table.register thead th:nth-child(3) { width: 30%; }
+        [data-testid="stMain"] h1 { font-size: 1.85rem; }
       }
     </style>
     """,
@@ -392,9 +570,10 @@ with st.sidebar:
     uploaded = st.file_uploader("Upload an observation CSV", type=["csv"], help="The dashboard expects the columns listed under the About tab.")
     if uploaded is None:
         data = make_demo_data()
+        timeline = make_demo_timeline(data)
         st.info("Showing synthetic demo data. No real learner information is included.")
     else:
-        data, error = load_uploaded_data(uploaded)
+        data, timeline, error = load_uploaded_data(uploaded)
         if error:
             st.error(error)
             st.stop()
@@ -423,8 +602,9 @@ if selected_learner != "All learners":
     filtered = filtered[filtered["learner_id"].astype(str) == selected_learner]
 
 scope = "all learners" if selected_learner == "All learners" else escape(selected_learner)
-st.title("Class register")
-st.markdown(f'<p class="scope">{start_date:%d %b %Y} to {end_date:%d %b %Y}, {scope}</p>', unsafe_allow_html=True)
+hero = st.container(key="hero")
+hero.title("Class register")
+hero.markdown(f'<p class="scope">{start_date:%d %b %Y} to {end_date:%d %b %Y}, {scope}</p>', unsafe_allow_html=True)
 
 if filtered.empty:
     st.warning("No observations match this learner and period. Change the filters in the side panel.")
@@ -435,14 +615,14 @@ avg_participation = filtered["participation_pct"].mean()
 learner_count = filtered["learner_id"].nunique()
 observation_count = len(filtered)
 
-metric_columns = st.container(key="kpis_overview").columns(4)
-metric_columns[0].metric("Average engagement", pct(avg_engagement))
+metric_columns = hero.container(key="kpis_overview").columns(4)
+metric_columns[0].metric("Engagement", pct(avg_engagement))
 metric_columns[1].metric("Participation", pct(avg_participation))
 metric_columns[2].metric("Observations", f"{observation_count:,}")
-metric_columns[3].metric("Learners included", f"{learner_count:,}")
+metric_columns[3].metric("Learners", f"{learner_count:,}")
 
-overview_tab, learner_tab, reports_tab, data_tab, privacy_tab = st.tabs(
-    ["Register", "Learner", "Reports", "Data", "About"]
+overview_tab, timeline_tab, learner_tab, reports_tab, data_tab, privacy_tab = st.tabs(
+    ["Register", "Timeline", "Learner", "Reports", "Data", "About"]
 )
 
 with overview_tab:
@@ -454,7 +634,12 @@ with overview_tab:
         .agg(Recent_observations=("engagement_pct", "size"), Recent_engagement=("engagement_pct", "mean"))
         .reset_index()
     )
-    review = per_learner[(per_learner["Recent_observations"] >= 3) & (per_learner["Recent_engagement"] < 45)]
+    # Near-zero engagement usually means the camera couldn't see a face, so it isn't marked for review.
+    review = per_learner[
+        (per_learner["Recent_observations"] >= 3)
+        & (per_learner["Recent_engagement"] < 45)
+        & (per_learner["Recent_engagement"] >= LOW_ENGAGEMENT_CHECK)
+    ]
     st.markdown(register_html(filtered, set(review["learner_id"].astype(str))), unsafe_allow_html=True)
     if review.empty:
         review_note = "No learner is marked for review in this selection. Keep using classroom context and your own judgment."
@@ -468,14 +653,14 @@ with overview_tab:
         trend = filtered.groupby("date", as_index=False).agg(
             Engagement=("engagement_pct", "mean"), Participation=("participation_pct", "mean")
         )
-        trend_long = trend.melt(id_vars="date", var_name="Measure", value_name="Percent")
+        trend_long = trend.melt(id_vars="date", var_name="Measure", value_name="Percent").dropna(subset=["Percent"])
         fig = px.line(
             trend_long,
             x="date",
             y="Percent",
             color="Measure",
             markers=True,
-            color_discrete_map={"Engagement": INK, "Participation": GREEN_PEN},
+            color_discrete_map={"Engagement": ORANGE, "Participation": INK},
             labels={"date": "Date", "Percent": "Average", "Measure": ""},
         )
         fig.update_yaxes(range=[0, 100], ticksuffix="%")
@@ -485,7 +670,7 @@ with overview_tab:
         activity = filtered["activity_level"].value_counts().rename_axis("Level").reset_index(name="Observations")
         shares = activity["Observations"] / activity["Observations"].sum()
         activity["Label"] = activity["Level"].astype(str) + " " + shares.map(pct_share)
-        level_colors = {"Low": RULE, "Moderate": SKY, "High": INK, "Unrated": "#AAB5C2"}
+        level_colors = {"Low": GRAY, "Moderate": ORANGE, "High": INK, "Unrated": "#E6E6E6"}
         order = [name for name in level_colors if name in activity["Level"].values]
         activity = activity.set_index("Level").loc[order].reset_index()
         fig = px.bar(
@@ -498,10 +683,100 @@ with overview_tab:
             labels={"Label": ""},
         )
         style_chart(fig, 150)
+        hatch_bars(fig, "Moderate")
         fig.update_xaxes(visible=False)
         fig.update_yaxes(visible=False)
         fig.update_layout(bargap=0.25)
         st.plotly_chart(fig, use_container_width=True)
+
+with timeline_tab:
+    st.subheader("Behavior through the day")
+    scoped = None
+    if timeline is None:
+        st.info("This file has daily totals only. To see behavior through the day, upload a file made by capture.py.")
+    else:
+        scoped = timeline[(timeline["date"] >= start_date) & (timeline["date"] <= end_date)]
+        if selected_learner != "All learners":
+            scoped = scoped[scoped["learner_id"].astype(str) == selected_learner]
+        if scoped.empty:
+            st.info("No camera measurements match this learner and period. Change the filters in the side panel.")
+            scoped = None
+
+    if scoped is not None:
+        if uploaded is None:
+            st.caption("Demo timeline made from synthetic data, not from a camera.")
+        learner_col, day_col, group_col = st.columns(3)
+        if selected_learner == "All learners":
+            timeline_learner = learner_col.selectbox("Learner", sorted(scoped["learner_id"].astype(str).unique()), key="timeline_learner")
+        else:
+            timeline_learner = selected_learner
+            learner_col.markdown(f"**Learner**  \n{timeline_learner}")
+        one_learner = scoped[scoped["learner_id"].astype(str) == timeline_learner]
+        days = sorted(one_learner["date"].unique(), reverse=True)
+        chosen_day = day_col.selectbox("Day", days, format_func=lambda day: f"{day:%d %b %Y}", key="timeline_day")
+        minutes = group_col.selectbox("Group by", [5, 10, 15], format_func=lambda value: f"Every {value} minutes", key="timeline_group")
+
+        day_rows = one_learner[one_learner["date"] == chosen_day]
+        buckets = (
+            day_rows.assign(timestamp=day_rows["timestamp"].dt.floor(f"{minutes}min"))
+            .groupby("timestamp", as_index=False)
+            .agg(
+                engagement_pct=("engagement_pct", "mean"),
+                movement_events=("movement_events", "sum"),
+                fidgeting_events=("fidgeting_events", "sum"),
+                looking_away_events=("looking_away_events", "sum"),
+            )
+        )
+
+        t1, t2, t3, t4 = st.container(key="kpis_timeline").columns(4)
+        t1.metric("Engagement", pct(day_rows["engagement_pct"].mean()))
+        t2.metric("Movement", f"{day_rows['movement_events'].sum():.0f}")
+        t3.metric("Fidgeting", f"{day_rows['fidgeting_events'].sum():.0f}")
+        t4.metric("Looking away", f"{day_rows['looking_away_events'].sum():.0f}")
+
+        if day_rows["engagement_pct"].mean() < LOW_ENGAGEMENT_CHECK:
+            st.warning(
+                "The camera rarely saw a forward-facing face in this session. This usually means the camera position, distance, "
+                "or lighting needs fixing, or the seat was empty. Please don't read this as low engagement."
+            )
+
+        st.subheader("What this shows")
+        other_days = one_learner[one_learner["date"] != chosen_day]
+        st.markdown("\n".join(f"- {line}" for line in caregiver_summary(day_rows, buckets, minutes, other_days)))
+        st.markdown(
+            '<p class="page-note">These are rough camera estimates to support a conversation, not a diagnosis or a judgment. '
+            "A high count is not automatically a problem: moving can help a child focus, and looking away can mean thinking, reading, or talking with a classmate.</p>",
+            unsafe_allow_html=True,
+        )
+
+        st.subheader("Estimated engagement")
+        fig = px.line(buckets, x="timestamp", y="engagement_pct", markers=True, color_discrete_sequence=[ORANGE], labels={"timestamp": "Time", "engagement_pct": "Estimated engagement"})
+        fig.update_yaxes(range=[0, 100], ticksuffix="%")
+        fig.update_xaxes(tickformat="%H:%M")
+        st.plotly_chart(style_chart(fig, 280), use_container_width=True)
+
+        st.subheader("Events")
+        events = buckets.melt(
+            id_vars="timestamp",
+            value_vars=["movement_events", "fidgeting_events", "looking_away_events"],
+            var_name="Event",
+            value_name="Count",
+        )
+        events["Event"] = events["Event"].map({"movement_events": "Movement", "fidgeting_events": "Fidgeting", "looking_away_events": "Looking away"})
+        fig = px.bar(events, x="timestamp", y="Count", color="Event", color_discrete_sequence=[INK, ORANGE, GRAY], labels={"timestamp": "Time", "Event": ""})
+        hatch_bars(fig, "Fidgeting")
+        fig.update_xaxes(tickformat="%H:%M")
+        st.plotly_chart(style_chart(fig, 300), use_container_width=True)
+
+        with st.expander("How each measure is worked out"):
+            st.markdown(
+                "- **Estimated engagement:** the share of time a forward-facing face was visible in the seat area, without large movement. "
+                "It can't tell whether a child is actually paying attention.\n"
+                "- **Movement:** a burst of large motion in the seat area, such as standing up or leaning across.\n"
+                "- **Fidgeting:** a burst of smaller motion in the seat area.\n"
+                "- **Looking away:** no forward-facing face for at least 3 seconds. Reading, writing, or poor lighting can also cause this.\n"
+                "- **Not measured:** participation, mood, learning, or any medical condition."
+            )
 
 with learner_tab:
     st.subheader("Learner detail")
@@ -515,12 +790,13 @@ with learner_tab:
 
     learner_data = filtered[filtered["learner_id"].astype(str) == learner_for_detail].sort_values("date")
     c1, c2, c3 = st.container(key="kpis_learner").columns(3)
-    c1.metric("Average engagement", pct(learner_data["engagement_pct"].mean()))
-    c2.metric("Average participation", pct(learner_data["participation_pct"].mean()))
+    c1.metric("Engagement", pct(learner_data["engagement_pct"].mean()))
+    c2.metric("Participation", pct(learner_data["participation_pct"].mean()))
     c3.metric("Observations", f"{len(learner_data):,}")
     learner_long = learner_data.melt(
         id_vars="date", value_vars=["engagement_pct", "participation_pct"], var_name="Measure", value_name="Percent"
     )
+    learner_long = learner_long.dropna(subset=["Percent"])
     learner_long["Measure"] = learner_long["Measure"].map(
         {"engagement_pct": "Engagement", "participation_pct": "Participation"}
     )
@@ -530,7 +806,7 @@ with learner_tab:
         y="Percent",
         color="Measure",
         markers=True,
-        color_discrete_map={"Engagement": INK, "Participation": GREEN_PEN},
+        color_discrete_map={"Engagement": ORANGE, "Participation": INK},
         labels={"date": "Date", "Percent": "Observed score", "Measure": ""},
     )
     fig.update_yaxes(range=[0, 100], ticksuffix="%")
@@ -542,7 +818,8 @@ with learner_tab:
     signals["Observation"] = signals["Observation"].map(
         {"movement_events": "Movement", "fidgeting_events": "Fidgeting", "looking_away_events": "Looking away"}
     )
-    fig = px.bar(signals, x="date", y="Events", color="Observation", barmode="group", color_discrete_sequence=[INK, GREEN_PEN, SKY], labels={"date": "Date"})
+    fig = px.bar(signals, x="date", y="Events", color="Observation", barmode="group", color_discrete_sequence=[INK, ORANGE, GRAY], labels={"date": "Date"})
+    hatch_bars(fig, "Fidgeting")
     fig.update_layout(legend_title_text="")
     st.plotly_chart(style_chart(fig, 300), use_container_width=True)
 
@@ -598,8 +875,11 @@ with privacy_tab:
     st.markdown("### CSV format")
     st.markdown("Required columns: `date`, `learner_id`, `engagement_pct`, `movement_events`, `fidgeting_events`, `looking_away_events`, `participation_pct`, `observation_minutes`. Dates should be parseable (for example `2026-11-09`); percentage fields should be from 0 to 100. `activity_level` is optional and is derived from movement events per observation minute when omitted.")
     st.markdown("### Review rule used in this demo")
-    st.markdown("A learner is marked **Review** in the register when at least three observations are present in the selected period and the mean engagement percentage across the most recent three observations is below 45%. This example threshold is illustrative and should be reviewed with educators before any real use.")
+    st.markdown("A learner is marked **Review** in the register when at least three observations are present in the selected period and the mean engagement percentage across the most recent three observations is below 45%. An average below 5% isn't marked, because it usually means the camera couldn't see a face. These example thresholds are illustrative and should be reviewed with educators before any real use.")
     st.markdown("### Project stack")
-    st.markdown("Built with Python, Streamlit, pandas, and Plotly. The reference materials also mention OpenCV, YOLO, ByteTrack, MediaPipe Pose, and federated learning; those video and model pipelines are outside this dashboard demo and are not implemented here.")
+    st.markdown("Built with Python, Streamlit, pandas, Plotly, and OpenCV. The reference materials also mention YOLO, ByteTrack, MediaPipe Pose, and federated learning; those are not implemented here.")
+    st.markdown("### Camera measurements")
+    st.markdown("`capture.py` runs on a local computer and measures only the chosen seat area for one learner with caregiver consent and school approval. It saves per-minute numbers and never saves video, images, or faces. It has no face recognition and does not detect or diagnose ADHD or any other condition. Upload its CSV here to see the Timeline tab.")
 
-st.markdown('<p class="page-note">Demo interface. Shows synthetic data until you upload a CSV.</p>', unsafe_allow_html=True)
+if uploaded is None:
+    st.markdown('<p class="page-note">Demo interface. Shows synthetic data until you upload a CSV.</p>', unsafe_allow_html=True)

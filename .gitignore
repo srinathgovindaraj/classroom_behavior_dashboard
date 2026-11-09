@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+# Measurements about real learners must never be committed.
+observations/

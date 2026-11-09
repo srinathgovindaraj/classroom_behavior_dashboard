@@ -1,0 +1,2 @@
+# OpenCV 5 removed CascadeClassifier, which capture.py uses for face visibility.
+opencv-python>=4.10,<5
