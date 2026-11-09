@@ -1,0 +1,18 @@
+[theme]
+base = "light"
+primaryColor = "#1B2F6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EAF1F9"
+textColor = "#1B2F6B"
+linkColor = "#1B2F6B"
+borderColor = "#CFE0F2"
+baseRadius = "small"
+font = "Andika:https://fonts.googleapis.com/css2?family=Andika:wght@400;700&display=swap"
+headingFont = "Kalam:https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#EAF1F9"
+secondaryBackgroundColor = "#FFFFFF"
+
+[client]
+toolbarMode = "minimal"

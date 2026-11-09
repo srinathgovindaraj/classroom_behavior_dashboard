@@ -24,7 +24,7 @@ st.set_page_config(
     page_title="Classroom Signals | Observation Dashboard",
     page_icon="📘",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",  # open on desktop, collapsed on phones so it doesn't cover the page
 )
 
 REQUIRED_COLUMNS = {
@@ -38,9 +38,11 @@ REQUIRED_COLUMNS = {
     "observation_minutes",
 }
 
-NAVY = "#152B45"
-TEAL = "#168C83"
-MUTED = "#728198"
+INK = "#1B2F6B"
+GREEN_PEN = "#1F8A70"
+SKY = "#7FA6D6"
+PENCIL = "#5B6780"
+RULE = "#CFE0F2"
 
 
 def make_demo_data() -> pd.DataFrame:
@@ -123,18 +125,61 @@ def style_chart(fig, height: int = 310):
     fig.update_layout(
         height=height,
         margin=dict(l=8, r=8, t=18, b=8),
+        dragmode=False,  # drag-to-zoom captures touches and stops the page scrolling on phones
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, system-ui, sans-serif", color="#42536A", size=12),
+        font=dict(family="Andika, system-ui, sans-serif", color=PENCIL, size=13),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        xaxis=dict(showgrid=False, linecolor="#E7ECF1"),
-        yaxis=dict(gridcolor="#EEF2F5", zeroline=False),
+        xaxis=dict(showgrid=False, linecolor=RULE),
+        yaxis=dict(gridcolor=RULE, zeroline=False),
     )
     return fig
 
 
 def pct(value) -> str:
     return f"{value:.0f}%" if pd.notna(value) else "—"
+
+
+def pct_share(share: float) -> str:
+    return f"{share * 100:.0f}%"
+
+
+def sparkline(values: list[float]) -> str:
+    """Draw a small engagement line on a fixed 0-100 scale, so learners stay comparable."""
+    width, height = 120, 24
+    label = f"Engagement from {values[0]:.0f}% to {values[-1]:.0f}%"
+    ys = [height - 2 - min(max(value, 0), 100) / 100 * (height - 4) for value in values]
+    if len(values) == 1:
+        mark = f'<circle cx="{width / 2}" cy="{ys[0]:.1f}" r="2.5" fill="currentColor"></circle>'
+    else:
+        step = width / (len(values) - 1)
+        points = " ".join(f"{index * step:.1f},{y:.1f}" for index, y in enumerate(ys))
+        mark = f'<polyline points="{points}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline>'
+    return f'<svg role="img" aria-label="{label}" viewBox="0 0 {width} {height}" preserveAspectRatio="none">{mark}</svg>'
+
+
+def register_html(frame: pd.DataFrame, review_ids: set[str]) -> str:
+    """Build the learner register. Rows stay in ID order: this view never ranks children."""
+    rows = []
+    for learner_id, group in frame.sort_values("date").groupby(frame["learner_id"].astype(str), sort=True):
+        safe_id = escape(learner_id)
+        if learner_id in review_ids:
+            who = f'<mark>{safe_id}</mark><span class="flag">Review</span>'
+        else:
+            who = safe_id
+        rows.append(
+            f'<tr><th scope="row">{who}</th>'
+            f'<td class="num">{pct(group["engagement_pct"].mean())}</td>'
+            f'<td class="num">{pct(group["participation_pct"].mean())}</td>'
+            f'<td class="trend">{sparkline(group["engagement_pct"].tolist())}</td>'
+            f'<td class="num obs">{len(group):,}</td></tr>'
+        )
+    head = (
+        '<tr><th scope="col">Learner</th><th scope="col" class="num">Engagement</th>'
+        '<th scope="col" class="num">Participation</th><th scope="col" class="trend"><span class="wide">Engagement trend</span><span class="narrow">Trend</span></th>'
+        '<th scope="col" class="num obs">Observations</th></tr>'
+    )
+    return f'<table class="register"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table>'
 
 
 def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -> bytes:
@@ -162,7 +207,7 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
     title_style = ParagraphStyle(
         name="ReportTitle",
         parent=styles["Title"],
-        textColor=colors.HexColor("#152B45"),
+        textColor=colors.HexColor(INK),
         fontSize=21,
         leading=26,
         alignment=0,
@@ -187,9 +232,9 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
     overview_table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF3F2")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#176F68")),
-                ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor("#152B45")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF1F9")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(INK)),
+                ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(INK)),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -228,7 +273,7 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
     detail_table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#152B45")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(INK)),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8.5),
@@ -254,39 +299,97 @@ def make_pdf_report(frame: pd.DataFrame, start: date, end: date, learner: str) -
 st.markdown(
     """
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
-      html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-      .stApp { background: #F5F7FA; color: #192B42; }
-      [data-testid="stSidebar"] { background: #152B45; }
-      [data-testid="stSidebar"] * { color: #F5F8FC; }
-      [data-testid="stSidebar"] [data-baseweb="select"] * { color: #192B42; }
-      [data-testid="stSidebar"] [data-testid="stFileUploader"] section { background: #203B59; border-color: #4A6682; }
-      .block-container { padding-top: 2rem; padding-bottom: 2.5rem; max-width: 1440px; }
-      h1, h2, h3 { font-family: 'Manrope', sans-serif; letter-spacing: -0.035em; }
-      h1 { color: #152B45; font-size: 2.15rem; }
-      h2, h3 { color: #203B59; }
-      [data-testid="stMetric"] { background: white; border: 1px solid #E8EDF2; padding: 18px 20px; border-radius: 14px; box-shadow: 0 2px 8px rgba(21,43,69,.035); }
-      [data-testid="stMetricLabel"] { color: #728198; font-weight: 600; }
-      [data-testid="stMetricValue"] { color: #152B45; font-family: 'Manrope', sans-serif; }
-      div[data-testid="stTabs"] button { font-weight: 600; }
-      .eyebrow { text-transform: uppercase; color: #168C83; font-weight: 700; font-size: .75rem; letter-spacing: .12em; }
-      .subtle { color: #728198; font-size: .96rem; }
-      .info-card { background: white; border: 1px solid #E8EDF2; padding: 20px 22px; border-radius: 14px; height: 100%; }
-      .info-card p { color: #62738A; margin-bottom: 0; }
-      .signal-card { background: #F1F8F7; border: 1px solid #D5EBE7; border-radius: 12px; padding: 15px 17px; margin: 8px 0; }
-      .signal-card strong { color: #176F68; }
-      .stDownloadButton button { background: #168C83; color: white; border: 0; border-radius: 9px; font-weight: 700; }
+      /* The page: white paper with the red margin line of an exercise book. */
+      .block-container {
+        max-width: 1180px;
+        /* Streamlit sizes this to one screen; it must grow so the margin line runs the full page. */
+        height: auto !important;
+        flex: 1 0 auto;
+        min-height: 100dvh;
+        padding: 3.75rem 2.5rem 2.5rem 6rem;
+        background: linear-gradient(#C8363F, #C8363F) 4.5rem 0 / 2px 100% no-repeat;
+      }
+      [data-testid="stMain"] h1 { font-size: 2.75rem; font-weight: 700; line-height: 1.15; padding: 0; }
+      [data-testid="stMain"] :is(h2, h3) { font-size: 1.5rem; font-weight: 700; padding: .5rem 0 .25rem; }
+      [data-testid="stMain"] p.scope { color: #5B6780; font-size: 1.05rem; margin: 0 0 1rem; }
+      [data-testid="stMain"] p.page-note { color: #5B6780; font-size: .9rem; line-height: 1.5; max-width: 70ch; margin: .75rem 0 1.5rem; }
+      [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: #5B6780 !important; opacity: 1 !important; }
+      [data-testid="stMain"] code { color: #1B2F6B; background: #EAF1F9; }
+      /* Both dates need the room the calendar icon takes; clicking the field still opens the calendar. */
+      [data-testid="stSidebar"] [data-testid="stDateInput"] input { font-size: .875rem; padding-right: 0; }
+      [data-testid="stSidebar"] [data-testid="stDateInput"] svg { display: none; }
+      .register .narrow { display: none; }
+      :focus-visible { outline: 2px solid #1B2F6B; outline-offset: 2px; }
+
+      /* Totals sit in the page as a written line, not as cards. */
+      [data-testid="stMetricLabel"] { color: #5B6780; }
+      [data-testid="stMetricValue"] { font-size: 1.75rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+      /* The register: every learner on a ruled line, in ID order. */
+      [data-testid="stMain"] table.register { display: table; width: 100%; border-collapse: collapse; border: 0; margin: .25rem 0 0; font-variant-numeric: tabular-nums; }
+      [data-testid="stMain"] table.register tr { border: 0; background: transparent; }
+      [data-testid="stMain"] table.register :is(th, td) { border: 0; border-bottom: 1px solid #CFE0F2; padding: 0 .75rem; height: 2.5rem; background: transparent; color: #1B2F6B; text-align: left; vertical-align: middle; font-size: 1rem; white-space: nowrap; }
+      [data-testid="stMain"] table.register thead th { border-bottom: 2px solid #1B2F6B; font-weight: 700; font-size: .9rem; }
+      [data-testid="stMain"] table.register tbody th { font-weight: 700; }
+      [data-testid="stMain"] table.register .num { text-align: right; }
+      [data-testid="stMain"] table.register td.trend { width: 40%; color: #1B2F6B; }
+      .register svg { display: block; width: 100%; max-width: 280px; height: 24px; }
+      .register mark { background: #FFF1A8; color: #1B2F6B; padding: .1rem .35rem; margin-left: -.35rem; }
+      .register .flag { display: inline-block; margin-left: .5rem; font-size: .8rem; font-weight: 400; }
+
+      .stDownloadButton button { background: #1B2F6B; color: white; border: 0; font-weight: 700; }
+      .stDownloadButton button p { color: white; }
+
+      /* Touch devices: no tap flash, larger targets, no iOS zoom on input focus. */
+      html { -webkit-tap-highlight-color: transparent; }
+      button, [role="tab"] { touch-action: manipulation; }
+      .stDownloadButton button:active { background: #12214D; }
+      @media (hover: none) {
+        .modebar-container { display: none !important; }
+      }
+      @media (pointer: coarse) {
+        input, textarea, select { font-size: 16px !important; }
+        [role="tab"], .stDownloadButton button { min-height: 44px; }
+      }
+
+      /* Phone layout */
+      @media (max-width: 640px) {
+        .block-container { padding: 3.75rem .875rem 2rem 2rem; background-position: 1.125rem 0; }
+        [data-testid="stMain"] h1 { font-size: 2.25rem; }
+        [data-testid="stMain"] :is(h2, h3) { font-size: 1.3rem; }
+        [data-testid="stMain"] p.scope { font-size: .95rem; }
+        [role="tablist"] { gap: .75rem; }
+        [class*="st-key-kpis"] [data-testid="stHorizontalBlock"] { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+        [class*="st-key-kpis"] [data-testid="stColumn"] { width: auto; min-width: 0; }
+        [class*="st-key-kpis"] [data-testid="stColumn"]:last-child:nth-child(odd) { grid-column: 1 / -1; }
+        [data-testid="stMetricValue"] { font-size: 1.5rem; }
+        [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { white-space: normal !important; overflow: visible !important; }
+        [data-testid="stMain"] table.register :is(th, td) { padding: 0 .25rem; font-size: .9rem; }
+        .register .wide { display: none; }
+        .register .narrow { display: inline; }
+        [data-testid="stMain"] table.register { table-layout: fixed; }
+        [data-testid="stMain"] table.register tbody th { white-space: normal; overflow-wrap: anywhere; }
+        [data-testid="stMain"] table.register thead th { font-size: .72rem; white-space: normal; line-height: 1.2; }
+        [data-testid="stMain"] table.register thead th:nth-child(1) { width: 20%; }
+        [data-testid="stMain"] table.register thead th:nth-child(2) { width: 28%; }
+        [data-testid="stMain"] table.register thead th:nth-child(3) { width: 30%; }
+        [data-testid="stMain"] table.register thead th:nth-child(4) { width: auto; }
+        [data-testid="stMain"] table.register .obs { display: none; }
+        .register .flag { display: block; margin-left: 0; font-size: .7rem; line-height: 1; }
+        [data-testid="stElementContainer"]:has(.stDownloadButton), .stDownloadButton, .stDownloadButton button { width: 100% !important; }
+      }
+      /* Smallest phones: keep the column headings on one line. */
+      @media (max-width: 360px) {
+        [data-testid="stMain"] table.register thead th { font-size: .68rem; }
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.markdown("## 📘 Classroom Signals")
-    st.caption("Observation dashboard")
-    st.markdown("---")
-    st.markdown("### Data source")
-    uploaded = st.file_uploader("Upload an observation CSV", type=["csv"], help="The dashboard expects the columns listed under Data & privacy.")
+    st.markdown("## Classroom Signals")
+    uploaded = st.file_uploader("Upload an observation CSV", type=["csv"], help="The dashboard expects the columns listed under the About tab.")
     if uploaded is None:
         data = make_demo_data()
         st.info("Showing synthetic demo data. No real learner information is included.")
@@ -307,11 +410,11 @@ with st.sidebar:
     )
     learner_options = ["All learners", *sorted(data["learner_id"].dropna().astype(str).unique())]
     selected_learner = st.selectbox("Learner", learner_options)
-    st.markdown("---")
     st.caption("Use pseudonymous IDs. This tool supports observation and discussion; it does not diagnose or rank children.")
 
-if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
-    start_date, end_date = selected_dates
+# While a range is being picked, the date input briefly returns only its first date.
+if isinstance(selected_dates, (tuple, list)):
+    start_date, end_date = selected_dates[0], selected_dates[-1]
 else:
     start_date = end_date = selected_dates
 
@@ -319,12 +422,12 @@ filtered = data[(data["date"] >= start_date) & (data["date"] <= end_date)].copy(
 if selected_learner != "All learners":
     filtered = filtered[filtered["learner_id"].astype(str) == selected_learner]
 
-st.markdown('<div class="eyebrow">Classroom observation</div>', unsafe_allow_html=True)
-st.title("Behavior & engagement overview")
-st.markdown('<p class="subtle">A supportive view of observed patterns over time, designed to help educators decide what to discuss or observe next.</p>', unsafe_allow_html=True)
+scope = "all learners" if selected_learner == "All learners" else escape(selected_learner)
+st.title("Class register")
+st.markdown(f'<p class="scope">{start_date:%d %b %Y} to {end_date:%d %b %Y}, {scope}</p>', unsafe_allow_html=True)
 
 if filtered.empty:
-    st.warning("There are no observations for the selected learner and date range. Adjust the filters to continue.")
+    st.warning("No observations match this learner and period. Change the filters in the side panel.")
     st.stop()
 
 avg_engagement = filtered["engagement_pct"].mean()
@@ -332,17 +435,33 @@ avg_participation = filtered["participation_pct"].mean()
 learner_count = filtered["learner_id"].nunique()
 observation_count = len(filtered)
 
-metric_columns = st.columns(4)
+metric_columns = st.container(key="kpis_overview").columns(4)
 metric_columns[0].metric("Average engagement", pct(avg_engagement))
 metric_columns[1].metric("Participation", pct(avg_participation))
 metric_columns[2].metric("Observations", f"{observation_count:,}")
 metric_columns[3].metric("Learners included", f"{learner_count:,}")
 
 overview_tab, learner_tab, reports_tab, data_tab, privacy_tab = st.tabs(
-    ["Overview", "Learner detail", "Reports", "Observation data", "Data & privacy"]
+    ["Register", "Learner", "Reports", "Data", "About"]
 )
 
 with overview_tab:
+    per_learner = (
+        filtered.sort_values("date")
+        .groupby("learner_id", group_keys=False)
+        .tail(3)
+        .groupby("learner_id")
+        .agg(Recent_observations=("engagement_pct", "size"), Recent_engagement=("engagement_pct", "mean"))
+        .reset_index()
+    )
+    review = per_learner[(per_learner["Recent_observations"] >= 3) & (per_learner["Recent_engagement"] < 45)]
+    st.markdown(register_html(filtered, set(review["learner_id"].astype(str))), unsafe_allow_html=True)
+    if review.empty:
+        review_note = "No learner is marked for review in this selection. Keep using classroom context and your own judgment."
+    else:
+        review_note = "Marked for review: the last three observations average below 45% engagement. This is a prompt for context, never a conclusion about a learner."
+    st.markdown(f'<p class="page-note">{review_note}</p>', unsafe_allow_html=True)
+
     left, right = st.columns([1.55, 1])
     with left:
         st.subheader("Engagement over time")
@@ -356,49 +475,33 @@ with overview_tab:
             y="Percent",
             color="Measure",
             markers=True,
-            color_discrete_map={"Engagement": TEAL, "Participation": "#E5A84B"},
+            color_discrete_map={"Engagement": INK, "Participation": GREEN_PEN},
             labels={"date": "Date", "Percent": "Average", "Measure": ""},
         )
         fig.update_yaxes(range=[0, 100], ticksuffix="%")
         st.plotly_chart(style_chart(fig, 340), use_container_width=True)
     with right:
         st.subheader("Observed activity mix")
-        activity = filtered["activity_level"].value_counts().rename_axis("Activity level").reset_index(name="Observations")
-        order = [name for name in ["Low", "Moderate", "High", "Unrated"] if name in activity["Activity level"].values]
-        fig = px.pie(
+        activity = filtered["activity_level"].value_counts().rename_axis("Level").reset_index(name="Observations")
+        shares = activity["Observations"] / activity["Observations"].sum()
+        activity["Label"] = activity["Level"].astype(str) + " " + shares.map(pct_share)
+        level_colors = {"Low": RULE, "Moderate": SKY, "High": INK, "Unrated": "#AAB5C2"}
+        order = [name for name in level_colors if name in activity["Level"].values]
+        activity = activity.set_index("Level").loc[order].reset_index()
+        fig = px.bar(
             activity,
-            names="Activity level",
-            values="Observations",
-            hole=0.72,
-            color="Activity level",
-            category_orders={"Activity level": order},
-            color_discrete_map={"Low": "#75B9AE", "Moderate": "#E8B65D", "High": "#D8806A", "Unrated": "#AAB5C2"},
+            x="Observations",
+            y=[""] * len(activity),
+            color="Label",
+            orientation="h",
+            color_discrete_sequence=[level_colors[name] for name in order],
+            labels={"Label": ""},
         )
-        fig.update_traces(textposition="inside", textinfo="percent", marker=dict(line=dict(color="white", width=3)))
-        fig.update_layout(showlegend=True, legend=dict(orientation="h", y=-0.08, x=0))
-        st.plotly_chart(style_chart(fig, 340), use_container_width=True)
-
-    st.subheader("Patterns to review")
-    st.caption("These simple flags summarize recent observations. They are prompts for context, never conclusions about a learner.")
-    per_learner = (
-        filtered.sort_values("date")
-        .groupby("learner_id", group_keys=False)
-        .tail(3)
-        .groupby("learner_id")
-        .agg(Recent_observations=("engagement_pct", "size"), Recent_engagement=("engagement_pct", "mean"), Recent_participation=("participation_pct", "mean"))
-        .reset_index()
-    )
-    review = per_learner[(per_learner["Recent_observations"] >= 3) & (per_learner["Recent_engagement"] < 45)]
-    if review.empty:
-        st.success("No learner met the demo review rule in this selection. Keep using classroom context and teacher judgment.")
-    else:
-        cols = st.columns(min(3, len(review)))
-        for index, row in enumerate(review.itertuples(index=False)):
-            with cols[index % len(cols)]:
-                st.markdown(
-                    f'<div class="signal-card"><strong>{row.learner_id}</strong><br><span>Average engagement below 45% across the last {row.Recent_observations} observations in this selection.</span></div>',
-                    unsafe_allow_html=True,
-                )
+        style_chart(fig, 150)
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        fig.update_layout(bargap=0.25)
+        st.plotly_chart(fig, use_container_width=True)
 
 with learner_tab:
     st.subheader("Learner detail")
@@ -411,7 +514,7 @@ with learner_tab:
         st.caption(f"Showing pseudonymous learner ID {learner_for_detail}.")
 
     learner_data = filtered[filtered["learner_id"].astype(str) == learner_for_detail].sort_values("date")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = st.container(key="kpis_learner").columns(3)
     c1.metric("Average engagement", pct(learner_data["engagement_pct"].mean()))
     c2.metric("Average participation", pct(learner_data["participation_pct"].mean()))
     c3.metric("Observations", f"{len(learner_data):,}")
@@ -427,7 +530,7 @@ with learner_tab:
         y="Percent",
         color="Measure",
         markers=True,
-        color_discrete_map={"Engagement": TEAL, "Participation": "#E5A84B"},
+        color_discrete_map={"Engagement": INK, "Participation": GREEN_PEN},
         labels={"date": "Date", "Percent": "Observed score", "Measure": ""},
     )
     fig.update_yaxes(range=[0, 100], ticksuffix="%")
@@ -439,7 +542,7 @@ with learner_tab:
     signals["Observation"] = signals["Observation"].map(
         {"movement_events": "Movement", "fidgeting_events": "Fidgeting", "looking_away_events": "Looking away"}
     )
-    fig = px.bar(signals, x="date", y="Events", color="Observation", barmode="group", color_discrete_sequence=[TEAL, "#E5A84B", "#7296C2"])
+    fig = px.bar(signals, x="date", y="Events", color="Observation", barmode="group", color_discrete_sequence=[INK, GREEN_PEN, SKY], labels={"date": "Date"})
     fig.update_layout(legend_title_text="")
     st.plotly_chart(style_chart(fig, 300), use_container_width=True)
 
@@ -485,23 +588,18 @@ with data_tab:
     )
 
 with privacy_tab:
-    st.subheader("Data handling")
     a, b = st.columns(2)
     with a:
-        st.markdown(
-            '<div class="info-card"><h3>Privacy first</h3><p>This demo uses pseudonymous learner IDs. The app code does not save uploaded CSV files to disk or send them to an external analytics service. If deployed, the hosting environment still processes the upload, so follow your school’s consent, access, and retention rules.</p></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown("### Privacy first")
+        st.markdown("This demo uses pseudonymous learner IDs. The app code does not save uploaded CSV files to disk or send them to an external analytics service. If deployed, the hosting environment still processes the upload, so follow your school’s consent, access, and retention rules.")
     with b:
-        st.markdown(
-            '<div class="info-card"><h3>Observation, not diagnosis</h3><p>Movement, engagement, and attention-related measures can be affected by the activity, environment, and many other factors. The dashboard offers descriptive summaries only; it should not be used to label, rank, or diagnose a child.</p></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown("### Observation, not diagnosis")
+        st.markdown("Movement, engagement, and attention-related measures can be affected by the activity, environment, and many other factors. The dashboard offers descriptive summaries only; it should not be used to label, rank, or diagnose a child.")
     st.markdown("### CSV format")
     st.markdown("Required columns: `date`, `learner_id`, `engagement_pct`, `movement_events`, `fidgeting_events`, `looking_away_events`, `participation_pct`, `observation_minutes`. Dates should be parseable (for example `2026-11-09`); percentage fields should be from 0 to 100. `activity_level` is optional and is derived from movement events per observation minute when omitted.")
     st.markdown("### Review rule used in this demo")
-    st.markdown("A learner appears under **Patterns to review** when at least three observations are present in the selected period and the mean engagement percentage across the most recent three observations is below 45%. This example threshold is illustrative and should be reviewed with educators before any real use.")
+    st.markdown("A learner is marked **Review** in the register when at least three observations are present in the selected period and the mean engagement percentage across the most recent three observations is below 45%. This example threshold is illustrative and should be reviewed with educators before any real use.")
     st.markdown("### Project stack")
-    st.markdown("Python · Streamlit · pandas · Plotly. The reference materials also mention OpenCV, YOLO, ByteTrack, MediaPipe Pose, and federated learning; those video and model pipelines are outside this dashboard demo and are not implemented here.")
+    st.markdown("Built with Python, Streamlit, pandas, and Plotly. The reference materials also mention OpenCV, YOLO, ByteTrack, MediaPipe Pose, and federated learning; those video and model pipelines are outside this dashboard demo and are not implemented here.")
 
-st.markdown("<br><div style='color:#8A97A7;font-size:.8rem'>Classroom Signals · Demo interface · Synthetic data by default</div>", unsafe_allow_html=True)
+st.markdown('<p class="page-note">Demo interface. Shows synthetic data until you upload a CSV.</p>', unsafe_allow_html=True)
