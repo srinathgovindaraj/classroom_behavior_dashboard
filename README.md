@@ -11,8 +11,10 @@ python -m venv .venv
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run dashboard.py
 ```
+
+`dashboard.py` is the dashboard. `app.py` wraps it in `st.App` as an ASGI entrypoint for hosts such as Vercel; you can run that directly with `uvicorn app:app`.
 
 The first launch shows synthetic demo data. Upload a CSV to use your own observations. The app code processes the uploaded data in the active Streamlit session and does not write it to disk; a hosted deployment still processes data on its server.
 
